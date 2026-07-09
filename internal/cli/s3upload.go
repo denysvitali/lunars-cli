@@ -83,7 +83,11 @@ func (u *AWSS3Uploader) PutObject(ctx context.Context, upload ObjectUpload) erro
 }
 
 func RunS3Upload(ctx context.Context, client *Client, uploader ObjectUploader, opts S3UploadOptions, target string, out io.Writer) error {
-	resolved, err := ResolveDownloadTarget(ctx, client, target)
+	return RunS3UploadWithOptions(ctx, client, uploader, opts, Options{}, target, out)
+}
+
+func RunS3UploadWithOptions(ctx context.Context, client *Client, uploader ObjectUploader, opts S3UploadOptions, selectOpts Options, target string, out io.Writer) error {
+	resolved, err := ResolveDownloadTargetOpts(ctx, client, target, selectOpts)
 	if err != nil {
 		return err
 	}

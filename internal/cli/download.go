@@ -13,7 +13,7 @@ import (
 )
 
 func RunDownload(ctx context.Context, client *Client, opts Options, target string, out io.Writer, cwd string) error {
-	resolved, err := ResolveDownloadTarget(ctx, client, target)
+	resolved, err := ResolveDownloadTargetOpts(ctx, client, target, opts)
 	if err != nil {
 		return err
 	}
@@ -121,6 +121,10 @@ type ResolvedDownload struct {
 }
 
 func ResolveDownloadTarget(ctx context.Context, client *Client, target string) (ResolvedDownload, error) {
+	return ResolveDownloadTargetOpts(ctx, client, target, Options{})
+}
+
+func ResolveDownloadTargetOpts(ctx context.Context, client *Client, target string, opts Options) (ResolvedDownload, error) {
 	if isHTTPURL(target) || strings.Contains(target, "/") {
 		archivePath, err := ArchivePathFromTarget(target)
 		return ResolvedDownload{ArchivePath: archivePath}, err
@@ -130,13 +134,18 @@ func ResolveDownloadTarget(ctx context.Context, client *Client, target string) (
 	if err != nil {
 		return ResolvedDownload{}, err
 	}
-	match, err := SelectFirmware(records, target)
+	match, err := SelectFirmwareOpts(records, target, opts)
 	if err == nil {
 		archivePath, err := ArchivePathFromTarget(match.DownloadURL)
 		if err != nil {
 			return ResolvedDownload{}, err
 		}
 		return ResolvedDownload{ArchivePath: archivePath, Firmware: &match}, nil
+	}
+
+	// latest / typed selection should not fall through to archive-path guessing
+	if isLatestQuery(target) || opts.Type != "" || opts.PickLatest {
+		return ResolvedDownload{}, err
 	}
 
 	if strings.Contains(target, ".") {

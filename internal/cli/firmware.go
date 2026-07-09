@@ -68,12 +68,25 @@ func (e FirmwareMatchError) Error() string {
 	if len(e.Matches) > 8 {
 		fmt.Fprintf(&builder, "  ...and %d more\n", len(e.Matches)-8)
 	}
-	builder.WriteString("Use an exact signature, archive path, or files.lunars.dev URL.")
+	builder.WriteString("Use an exact signature, archive path, files.lunars.dev URL, --type, or --pick-latest.")
 	return builder.String()
 }
 
 func SelectFirmware(records []FirmwareRecord, query string) (FirmwareRecord, error) {
-	normalized := strings.ToLower(query)
+	return SelectFirmwareOpts(records, query, Options{})
+}
+
+func SelectFirmwareOpts(records []FirmwareRecord, query string, opts Options) (FirmwareRecord, error) {
+	records = FilterFirmware(records, Options{Type: opts.Type})
+	normalized := strings.ToLower(strings.TrimSpace(query))
+	if normalized == "" {
+		return FirmwareRecord{}, fmt.Errorf("firmware query is empty")
+	}
+
+	if isLatestQuery(normalized) {
+		return SelectLatestFirmware(records)
+	}
+
 	var exact []FirmwareRecord
 	for _, record := range records {
 		for _, value := range []string{record.Signature, record.FirmwareVersion, baseNameFromURL(record.DownloadURL)} {
@@ -88,6 +101,9 @@ func SelectFirmware(records []FirmwareRecord, query string) (FirmwareRecord, err
 		return exact[0], nil
 	}
 	if len(exact) > 1 {
+		if opts.PickLatest {
+			return pickLatestAmong(exact, query)
+		}
 		return FirmwareRecord{}, FirmwareMatchError{Query: query, Matches: exact}
 	}
 
@@ -105,10 +121,117 @@ func SelectFirmware(records []FirmwareRecord, query string) (FirmwareRecord, err
 		return partial[0], nil
 	}
 	if len(partial) > 1 {
+		if opts.PickLatest {
+			return pickLatestAmong(partial, query)
+		}
 		return FirmwareRecord{}, FirmwareMatchError{Query: query, Matches: partial}
 	}
 
 	return FirmwareRecord{}, fmt.Errorf("no firmware record matched %q; use \"lunars list --search %s\" to inspect matches", query, query)
+}
+
+func SelectLatestFirmware(records []FirmwareRecord) (FirmwareRecord, error) {
+	if len(records) == 0 {
+		return FirmwareRecord{}, fmt.Errorf("no firmware records available")
+	}
+	return pickLatestAmong(records, "latest")
+}
+
+func pickLatestAmong(records []FirmwareRecord, query string) (FirmwareRecord, error) {
+	if len(records) == 0 {
+		return FirmwareRecord{}, fmt.Errorf("no firmware records matched %q", query)
+	}
+	if len(records) == 1 {
+		return records[0], nil
+	}
+
+	sorted := append([]FirmwareRecord(nil), records...)
+	SortFirmwareNewestFirst(sorted)
+	newestVersion := sorted[0].FirmwareVersion
+	sameVersion := make([]FirmwareRecord, 0, len(sorted))
+	for _, record := range sorted {
+		if record.FirmwareVersion == newestVersion {
+			sameVersion = append(sameVersion, record)
+		}
+	}
+	if len(sameVersion) == 1 {
+		return sameVersion[0], nil
+	}
+	return FirmwareRecord{}, FirmwareMatchError{Query: query, Matches: sameVersion}
+}
+
+func isLatestQuery(query string) bool {
+	switch strings.ToLower(strings.TrimSpace(query)) {
+	case "latest", "newest":
+		return true
+	default:
+		return false
+	}
+}
+
+// CompareFirmwareVersion compares Tesla-style versions (year.week.patch...).
+// Higher/newer versions compare greater. Empty versions sort lowest.
+func CompareFirmwareVersion(a, b string) int {
+	as := versionParts(a)
+	bs := versionParts(b)
+	n := len(as)
+	if len(bs) > n {
+		n = len(bs)
+	}
+	for i := 0; i < n; i++ {
+		var av, bv int
+		if i < len(as) {
+			av = as[i]
+		}
+		if i < len(bs) {
+			bv = bs[i]
+		}
+		if av != bv {
+			if av < bv {
+				return -1
+			}
+			return 1
+		}
+	}
+	// Fall back to raw string when numeric parts equal (e.g. suffix noise).
+	return strings.Compare(a, b)
+}
+
+func versionParts(version string) []int {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return nil
+	}
+	// Strip common non-numeric prefixes/suffixes by splitting on non-digits.
+	parts := make([]int, 0, 4)
+	current := 0
+	inNumber := false
+	for _, r := range version {
+		if r >= '0' && r <= '9' {
+			current = current*10 + int(r-'0')
+			inNumber = true
+			continue
+		}
+		if inNumber {
+			parts = append(parts, current)
+			current = 0
+			inNumber = false
+		}
+	}
+	if inNumber {
+		parts = append(parts, current)
+	}
+	return parts
+}
+
+func SortFirmwareNewestFirst(records []FirmwareRecord) {
+	sort.SliceStable(records, func(i, j int) bool {
+		if cmp := CompareFirmwareVersion(records[i].FirmwareVersion, records[j].FirmwareVersion); cmp != 0 {
+			return cmp > 0
+		}
+		// Prefer newer firmwareDate when versions tie.
+		return records[i].FirmwareDate > records[j].FirmwareDate
+	})
 }
 
 func firmwareChoice(record FirmwareRecord) string {
@@ -168,9 +291,7 @@ func RenderFirmwareTable(records []FirmwareRecord) string {
 		return "No firmware records matched.\n"
 	}
 
-	sort.SliceStable(records, func(i, j int) bool {
-		return records[i].FirmwareVersion > records[j].FirmwareVersion
-	})
+	SortFirmwareNewestFirst(records)
 
 	rows := make([]map[string]string, 0, len(records))
 	for _, record := range records {

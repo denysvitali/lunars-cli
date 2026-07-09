@@ -27,6 +27,7 @@ type Options struct {
 	JSON       bool
 	LogLevel   string
 	Output     string
+	PickLatest bool
 	Resume     bool
 	Search     string
 	Type       string
@@ -135,9 +136,9 @@ func NewRootCommand(out, errOut io.Writer, version string) *cobra.Command {
 	authCmd.AddCommand(authCheckCmd)
 
 	downloadCmd := &cobra.Command{
-		Use:   "download <version|signature|path|url>",
+		Use:   "download <version|signature|latest|path|url> [target...]",
 		Short: "Download a file through lunars.dev",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := loadConfig(); err != nil {
 				return err
@@ -146,16 +147,40 @@ func NewRootCommand(out, errOut io.Writer, version string) *cobra.Command {
 			opts.Output, _ = cmd.Flags().GetString("output")
 			opts.Force, _ = cmd.Flags().GetBool("force")
 			opts.Resume, _ = cmd.Flags().GetBool("resume")
+			opts.PickLatest, _ = cmd.Flags().GetBool("pick-latest")
+			opts.Type, _ = cmd.Flags().GetString("type")
+			opts.Type = strings.ToLower(opts.Type)
 			client, err := clientFromOptions(opts, errOut)
 			if err != nil {
 				return err
 			}
-			return RunDownload(cmd.Context(), client, opts, args[0], out, ".")
+			if len(args) > 1 && opts.Output != "" {
+				if info, statErr := os.Stat(opts.Output); statErr != nil || !info.IsDir() {
+					if statErr == nil && !info.IsDir() {
+						return fmt.Errorf("--output must be a directory when downloading multiple targets")
+					}
+					// Missing path: only allow if it already exists as a directory.
+					if os.IsNotExist(statErr) {
+						return fmt.Errorf("--output must be an existing directory when downloading multiple targets")
+					}
+					if statErr != nil {
+						return statErr
+					}
+				}
+			}
+			for _, target := range args {
+				if err := RunDownload(cmd.Context(), client, opts, target, out, "."); err != nil {
+					return err
+				}
+			}
+			return nil
 		},
 	}
 	downloadCmd.Flags().StringP("output", "o", "", "output file or existing directory")
 	downloadCmd.Flags().Bool("force", false, "overwrite an existing output file")
 	downloadCmd.Flags().Bool("resume", false, "resume a partial .part download when the server supports ranges")
+	downloadCmd.Flags().Bool("pick-latest", false, "when multiple records match, pick the newest firmware version")
+	downloadCmd.Flags().String("type", "", "filter records by file type (e.g. mcu2, ape3)")
 
 	configCmd := &cobra.Command{
 		Use:   "config",
@@ -272,6 +297,9 @@ func NewRootCommand(out, errOut io.Writer, version string) *cobra.Command {
 			uploadOpts.PathStyle = boolFlagOrConfig(cmd, settings, "path-style", "s3.path-style", true)
 			uploadOpts.Execute, _ = cmd.Flags().GetBool("execute")
 			yes, _ := cmd.Flags().GetBool("yes")
+			opts.PickLatest, _ = cmd.Flags().GetBool("pick-latest")
+			opts.Type, _ = cmd.Flags().GetString("type")
+			opts.Type = strings.ToLower(opts.Type)
 
 			var uploader ObjectUploader
 			if uploadOpts.Execute {
@@ -289,7 +317,7 @@ func NewRootCommand(out, errOut io.Writer, version string) *cobra.Command {
 					return err
 				}
 			}
-			return RunS3Upload(cmd.Context(), client, uploader, uploadOpts, args[0], out)
+			return RunS3UploadWithOptions(cmd.Context(), client, uploader, uploadOpts, opts, args[0], out)
 		},
 	}
 	s3Cmd.Flags().String("bucket", "", "S3 bucket name")
@@ -300,6 +328,8 @@ func NewRootCommand(out, errOut io.Writer, version string) *cobra.Command {
 	s3Cmd.Flags().Bool("path-style", true, "use path-style bucket addressing")
 	s3Cmd.Flags().Bool("execute", false, "actually request a signed URL and upload; dry-run by default")
 	s3Cmd.Flags().Bool("yes", false, "skip the --execute confirmation prompt")
+	s3Cmd.Flags().Bool("pick-latest", false, "when multiple records match, pick the newest firmware version")
+	s3Cmd.Flags().String("type", "", "filter records by file type (e.g. mcu2, ape3)")
 	uploadCmd.AddCommand(s3Cmd)
 
 	root.AddCommand(authCmd, listCmd, limitCmd, downloadCmd, configCmd, uploadCmd, completionCommand(root, out))
@@ -364,6 +394,7 @@ func optionsFromViper(settings *viper.Viper) Options {
 		JSON:       settings.GetBool("json"),
 		LogLevel:   settings.GetString("log-level"),
 		Output:     settings.GetString("output"),
+		PickLatest: settings.GetBool("pick-latest"),
 		Resume:     settings.GetBool("resume"),
 		Search:     settings.GetString("search"),
 		Type:       strings.ToLower(settings.GetString("type")),
@@ -565,7 +596,32 @@ func CookieFromOptions(opts Options) (string, error) {
 		}
 		return ParseCookieFile(string(data), "lunars.dev")
 	}
-	return "", errors.New("authentication required; set LUNARS_COOKIE or pass --cookie/--cookie-file from an authorized lunars.dev browser session")
+
+	for _, candidate := range defaultCookieCandidates() {
+		data, err := os.ReadFile(candidate) // #nosec G304 -- fixed local/XDG cookie path candidates only
+		if err != nil {
+			continue
+		}
+		cookie, err := ParseCookieFile(string(data), "lunars.dev")
+		if err != nil {
+			continue
+		}
+		return cookie, nil
+	}
+
+	return "", errors.New("authentication required; set LUNARS_COOKIE, pass --cookie/--cookie-file, or place a session token in .lunars-token / .lunars-cookie / cookies.txt")
+}
+
+func defaultCookieCandidates() []string {
+	candidates := []string{".lunars-token", ".lunars-cookie", "cookies.txt"}
+	if configHome, err := os.UserConfigDir(); err == nil {
+		candidates = append(candidates,
+			filepath.Join(configHome, "lunars", "token"),
+			filepath.Join(configHome, "lunars", "cookie"),
+			filepath.Join(configHome, "lunars", "cookies.txt"),
+		)
+	}
+	return candidates
 }
 
 func loggerFromOptions(opts Options, errOut io.Writer) (*logrus.Logger, error) {

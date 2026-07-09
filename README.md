@@ -11,6 +11,9 @@ go run . list --search 2024.26
 go run . limit
 go run . auth check
 go run . download 2024.26.8 -o firmware.bin
+go run . download 2026.8 --type mcu2 --pick-latest
+go run . download latest --type mcu2 -o latest.mcu2
+go run . download 2026.8.3 latest --type mcu2 -o ./downloads/
 go run . download https://files.lunars.dev/model-s.html
 go run . config init --bucket my-bucket --prefix lunars/
 go run . config set s3.bucket my-bucket
@@ -26,6 +29,17 @@ go run . --cookie-file ./cookies.txt download 2024.26.8
 
 `--cookie-file` accepts either a raw Cookie header saved to a file or a Netscape cookie export containing `lunars.dev` cookies.
 It also accepts a file containing only the `__Secure-next-auth.session-token` value.
+
+If neither flag is set, the CLI also looks for a session in:
+
+```text
+./.lunars-token
+./.lunars-cookie
+./cookies.txt
+$XDG_CONFIG_HOME/lunars/token
+$XDG_CONFIG_HOME/lunars/cookie
+$XDG_CONFIG_HOME/lunars/cookies.txt
+```
 
 ## Configuration
 
@@ -65,7 +79,10 @@ Flags override config file values. You can also use `--config /path/to/config.ya
 - `list`: show firmware records from `/api/signature`
 - `limit`: show monthly download usage from `/api/limit`
 - `auth check`: validate the configured session and show quota
-- `download <target>`: sign and download by firmware version, signature, archive path, or `files.lunars.dev` URL
+- `download <target> [target...]`: sign and download by firmware version, signature, `latest`/`newest`, archive path, or `files.lunars.dev` URL
+  - `--type`: filter by archive extension (`mcu2`, `ape3`, …)
+  - `--pick-latest`: when a partial query matches multiple versions, take the newest
+  - multiple targets require `--output` to be an existing directory (or omit it)
 - `config path`: show the XDG config file path
 - `config init`: write S3 defaults to the XDG config file
 - `config show`: show effective S3 config
